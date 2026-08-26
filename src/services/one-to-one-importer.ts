@@ -251,7 +251,16 @@ export class OneToOneImporter {
      */
     private async saveMarkdown(content: string, filename: string, targetFolder: string): Promise<void> {
         const filepath = `${targetFolder}/${filename}`.replace(/\/\//g, '/');
-        await this.app.vault.create(filepath, content);
+
+        // If the note was already imported (e.g. a page was added and the .note
+        // re-exported under the same name), overwrite it instead of throwing
+        // "File already exists" from vault.create().
+        const existingFile = this.app.vault.getAbstractFileByPath(filepath);
+        if (existingFile instanceof TFile) {
+            await this.app.vault.modify(existingFile, content);
+        } else {
+            await this.app.vault.create(filepath, content);
+        }
     }
 
     /**
