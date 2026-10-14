@@ -86,6 +86,7 @@ export interface ViwoodsSettings {
     pollingIntervalMinutes: number;
     showSyncNotifications: boolean;
     syncOnStartup: boolean;
+    autoImportOnDetect: boolean;
 
     // Debug settings (1)
     debugMode: boolean;

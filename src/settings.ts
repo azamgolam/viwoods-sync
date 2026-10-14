@@ -147,6 +147,16 @@ export class ViwoodsSettingTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
+            .setName('Auto-import detected changes')
+            .setDesc('Import new and changed notes automatically when detected (hands-off). Turn off to review and import manually.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.autoImportOnDetect)
+                .onChange(async (value) => {
+                    this.plugin.settings.autoImportOnDetect = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
             .setName('Show notifications')
             .setDesc('Show notifications when changes are detected')
             .addToggle(toggle => toggle

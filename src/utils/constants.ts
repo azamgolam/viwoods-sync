@@ -21,6 +21,7 @@ export const DEFAULT_SETTINGS: ViwoodsSettings = {
     pollingIntervalMinutes: 5,
     showSyncNotifications: true,
     syncOnStartup: false,
+    autoImportOnDetect: true,
 
     // Debug settings
     debugMode: false,

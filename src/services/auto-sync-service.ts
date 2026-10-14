@@ -190,9 +190,14 @@ export class AutoSyncService {
             // Update status
             this.updateStatus();
 
-            // Show notification if changes detected
-            if (changes.length > 0 && this.settings.showSyncNotifications) {
-                this.showChangesNotification(changes);
+            if (changes.length > 0) {
+                if (this.settings.autoImportOnDetect) {
+                    // Hands-off: import the detected changes immediately.
+                    await this.importDetectedChanges();
+                } else if (this.settings.showSyncNotifications) {
+                    // Review mode: just notify; user imports manually.
+                    this.showChangesNotification(changes);
+                }
             }
 
             return changes;
@@ -314,7 +319,7 @@ export class AutoSyncService {
 
         if (failCount > 0) {
             new Notice(`Imported ${successCount} files, ${failCount} failed`);
-        } else {
+        } else if (this.settings.showSyncNotifications) {
             new Notice(`Imported ${successCount} file${successCount > 1 ? 's' : ''}`);
         }
     }
