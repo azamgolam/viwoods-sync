@@ -1,6 +1,6 @@
 // services/one-to-one-importer.ts - Simplified one-to-one import service
 
-import { App, TFile } from 'obsidian';
+import { App, TFile, normalizePath } from 'obsidian';
 import type { ViwoodsSettings, BookResult } from '../types.js';
 import { ensureFolder } from '../utils/file-utils.js';
 import { log } from '../utils/logger.js';
@@ -50,10 +50,11 @@ export class OneToOneImporter {
 
             await ensureFolder(this.app, targetFolder);
 
-            // Get Obsidian's configured attachment folder path
-            // The attachment folder is relative to vault root
+            // Get Obsidian's configured attachment folder path and resolve it
+            // relative to the note being written (Obsidian supports several modes,
+            // e.g. "./attachments" = subfolder next to the note).
             const attachmentConfig = (this.app.vault as { config?: { attachmentFolderPath?: string } }).config?.attachmentFolderPath;
-            const attachmentFolder = attachmentConfig || this.settings.notesFolder;
+            const attachmentFolder = this.resolveAttachmentFolder(attachmentConfig, targetFolder);
 
             // Save all attachments and get their filenames with relative paths
             const attachments = await this.saveAttachments(book, attachmentFolder, relativeDir);
@@ -154,6 +155,73 @@ export class OneToOneImporter {
     }
 
     /**
+     * Resolve Obsidian's configured attachment location into a concrete vault path.
+     *
+     * Obsidian supports several attachment-folder modes:
+     *   ''  or '/'   -> vault root
+     *   '.' or './'  -> same folder as the note
+     *   './sub'      -> subfolder under the note's folder
+     *   'folder/sub' -> fixed folder relative to the vault root
+     *
+     * @param configPath - Raw value of app.vault.config.attachmentFolderPath
+     * @param noteFolder - Folder the markdown note is being written to
+     */
+    private resolveAttachmentFolder(configPath: string | undefined, noteFolder: string): string {
+        const raw = (configPath ?? '').trim();
+
+        // Vault root
+        if (raw === '' || raw === '/') {
+            return '';
+        }
+        // Same folder as the note
+        if (raw === '.' || raw === './') {
+            return normalizePath(noteFolder);
+        }
+        // Subfolder relative to the note's folder
+        if (raw.startsWith('./')) {
+            const sub = raw.slice(2);
+            return normalizePath(noteFolder ? `${noteFolder}/${sub}` : sub);
+        }
+        // Fixed folder relative to the vault root
+        return normalizePath(raw);
+    }
+
+    /**
+     * Write a binary attachment, creating it or overwriting an existing one,
+     * and return the actual filename that was written so callers can link to it.
+     *
+     * Obsidian's path index is case-sensitive even on case-insensitive
+     * filesystems (macOS/iCloud), so a plain getAbstractFileByPath() can miss a
+     * file that physically exists under different folder/name casing. When that
+     * happens createBinary() fails with "already exists" and the page silently
+     * loses its image. We look the file up case-insensitively and modify it
+     * in place instead.
+     */
+    private async writeBinaryAttachment(filepath: string, buffer: ArrayBuffer): Promise<string> {
+        const existing = this.findFileCaseInsensitive(filepath);
+        if (existing) {
+            await this.app.vault.modifyBinary(existing, buffer);
+            return existing.name;
+        }
+        await this.app.vault.createBinary(filepath, buffer);
+        return filepath.split('/').pop() as string;
+    }
+
+    /**
+     * Find an existing vault file at the given path, tolerant of case
+     * differences (returns null if none exists).
+     */
+    private findFileCaseInsensitive(filepath: string): TFile | null {
+        const direct = this.app.vault.getAbstractFileByPath(filepath);
+        if (direct instanceof TFile) {
+            return direct;
+        }
+        const lower = filepath.toLowerCase();
+        const match = this.app.vault.getFiles().find(f => f.path.toLowerCase() === lower);
+        return match ?? null;
+    }
+
+    /**
      * Save all attachments to Obsidian's attachment folder
      * @param book - The book data
      * @param attachmentFolder - Obsidian's configured attachment folder
@@ -185,24 +253,20 @@ export class OneToOneImporter {
         for (const page of book.pages) {
             const ext = this.settings.outputFormat === 'svg' ? 'svg' : 'png';
             const filename = `${namePrefix}_page_${page.pageNum}.${ext}`;
-            const filepath = `${attachmentFolder}/${filename}`;
+            const filepath = normalizePath(attachmentFolder ? `${attachmentFolder}/${filename}` : filename);
 
             try {
-                // Create folder if it doesn't exist
-                await ensureFolder(this.app, attachmentFolder);
+                // Create folder if it doesn't exist (root needs no folder)
+                if (attachmentFolder) {
+                    await ensureFolder(this.app, attachmentFolder);
+                }
 
                 // Convert blob to buffer
                 const buffer = await page.image.blob.arrayBuffer();
 
-                // Use app.vault.createBinary() instead of adapter.writeBinary()
-                // This triggers proper Obsidian events for Notepix to detect
-                const existingFile = this.app.vault.getAbstractFileByPath(filepath);
-                if (existingFile instanceof TFile) {
-                    await this.app.vault.modifyBinary(existingFile, buffer);
-                } else {
-                    await this.app.vault.createBinary(filepath, buffer);
-                }
-                savedFiles.push({ filename, relativePath: this.calculateRelativePath(filename) });
+                // Write (create or overwrite) and link by the file's real name.
+                const savedName = await this.writeBinaryAttachment(filepath, buffer);
+                savedFiles.push({ filename: savedName, relativePath: this.calculateRelativePath(savedName) });
             } catch (error) {
                 log.error(`Failed to save attachment ${filename}:`, error);
             }
@@ -212,18 +276,16 @@ export class OneToOneImporter {
         for (const page of book.pages) {
             if (page.audio) {
                 const filename = `${namePrefix}_${page.audio.originalName}`;
-                const filepath = `${attachmentFolder}/${filename}`;
+                const filepath = normalizePath(attachmentFolder ? `${attachmentFolder}/${filename}` : filename);
 
                 try {
+                    if (attachmentFolder) {
+                        await ensureFolder(this.app, attachmentFolder);
+                    }
                     const buffer = await page.audio.blob.arrayBuffer();
 
-                    const existingFile = this.app.vault.getAbstractFileByPath(filepath);
-                    if (existingFile instanceof TFile) {
-                        await this.app.vault.modifyBinary(existingFile, buffer);
-                    } else {
-                        await this.app.vault.createBinary(filepath, buffer);
-                    }
-                    savedFiles.push({ filename, relativePath: this.calculateRelativePath(filename) });
+                    const savedName = await this.writeBinaryAttachment(filepath, buffer);
+                    savedFiles.push({ filename: savedName, relativePath: this.calculateRelativePath(savedName) });
                 } catch (error) {
                     log.error(`Failed to save audio ${filename}:`, error);
                 }
