@@ -178,7 +178,17 @@ export class ImporterService {
 
                 for (let i = 0; i < noteList.length; i++) {
                     const page = noteList[i];
-                    const imageFile = files.find(f => f === `${page.pageId}.png`);
+                    // NoteList entries identify the page image by `id` (some older
+                    // exports used `pageId`); fall back to the basename of
+                    // pageFilePath so a missing/renamed id still resolves the PNG.
+                    const pageImageId = page.id ?? page.pageId;
+                    const pageFileBase = typeof page.pageFilePath === 'string'
+                        ? (page.pageFilePath.split(/[/\\]/).pop() || '')
+                        : '';
+                    const imageFile = files.find(f =>
+                        (pageImageId && f === `${pageImageId}.png`) ||
+                        (!!pageFileBase && f === pageFileBase)
+                    );
                     if (imageFile) {
                         const imageFileObj = zip.file(imageFile);
                         if (imageFileObj) {
