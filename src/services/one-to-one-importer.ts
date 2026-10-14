@@ -1,6 +1,6 @@
 // services/one-to-one-importer.ts - Simplified one-to-one import service
 
-import { App, TFile, normalizePath } from 'obsidian';
+import { App, TFile, normalizePath, moment } from 'obsidian';
 import type { ViwoodsSettings, BookResult } from '../types.js';
 import { ensureFolder } from '../utils/file-utils.js';
 import { log } from '../utils/logger.js';
@@ -66,6 +66,9 @@ export class OneToOneImporter {
             const filename = `${book.bookName}.md`;
             // targetFolder already includes relativeDir structure, pass just filename
             await this.saveMarkdown(markdown, filename, targetFolder);
+
+            // Embed the page image(s) into the matching Obsidian daily note.
+            await this.addToDailyNote(book, relativePath, attachments);
 
             // Build the full path for the return value (for display/logging)
             const fullPath = `${targetFolder}/${filename}`.replace(/\/\//g, '/');
@@ -293,6 +296,133 @@ export class OneToOneImporter {
         }
 
         return savedFiles;
+    }
+
+    /**
+     * Embed this note's page image(s) into the Obsidian daily note for the
+     * note's date. Daily notes (day_YYYY_M_D) map to their own date; any other
+     * note maps to the daily note for the date it was created on the device.
+     * The embed is inserted at the top of the daily note (after frontmatter, if
+     * present), and the daily note is created from scratch if it doesn't exist.
+     */
+    private async addToDailyNote(
+        book: BookResult,
+        relativePath: string | undefined,
+        attachments: Array<{ filename: string; relativePath: string }>
+    ): Promise<void> {
+        try {
+            // Only image pages are embedded (not audio).
+            const pageImages = attachments
+                .map(a => {
+                    const m = a.filename.match(/_page_(\d+)\./);
+                    return m ? { pageNum: parseInt(m[1], 10), relativePath: a.relativePath } : null;
+                })
+                .filter((x): x is { pageNum: number; relativePath: string } => x !== null)
+                .sort((a, b) => a.pageNum - b.pageNum);
+            if (pageImages.length === 0) {
+                return;
+            }
+
+            const date = this.resolveNoteDate(book, relativePath);
+            if (!date) {
+                log.debug('Could not resolve a date for note; skipping daily-note embed', book.bookName);
+                return;
+            }
+
+            const { folder, format } = this.getDailyNotesConfig();
+            const dailyName = moment(date).format(format);
+            const dailyPath = normalizePath(folder ? `${folder}/${dailyName}.md` : `${dailyName}.md`);
+
+            // Resolve (or create) the daily note.
+            let file = this.app.vault.getAbstractFileByPath(dailyPath);
+            if (!(file instanceof TFile)) {
+                const dir = dailyPath.substring(0, dailyPath.lastIndexOf('/'));
+                if (dir) {
+                    await ensureFolder(this.app, dir);
+                }
+                file = await this.app.vault.create(dailyPath, '');
+                log.debug(`Created daily note ${dailyPath}`);
+            }
+
+            const content = await this.app.vault.read(file as TFile);
+
+            // Build embed lines, skipping any image already present (idempotent
+            // across re-syncs).
+            const linesToAdd = pageImages
+                .filter(p => !content.includes(p.relativePath))
+                .map(p => `![Page ${p.pageNum}](<${p.relativePath}>)`);
+            if (linesToAdd.length === 0) {
+                return;
+            }
+
+            const block = linesToAdd.join('\n') + '\n';
+
+            // Insert after a leading YAML frontmatter block if there is one,
+            // otherwise at the very top.
+            const fmMatch = content.match(/^---\n[\s\S]*?\n---\n?/);
+            let newContent: string;
+            if (fmMatch) {
+                const idx = fmMatch[0].length;
+                newContent = content.slice(0, idx) + '\n' + block + content.slice(idx);
+            } else {
+                newContent = block + (content.length ? '\n' + content : '');
+            }
+
+            await this.app.vault.modify(file as TFile, newContent);
+            log.debug(`Embedded ${linesToAdd.length} page image(s) into ${dailyPath}`);
+        } catch (error) {
+            // Never let daily-note embedding break the main import.
+            log.error('Failed to add note to daily note:', error);
+        }
+    }
+
+    /**
+     * Determine the calendar date a note belongs to.
+     * - "day_YYYY_M_D" notes map to that explicit date.
+     * - Otherwise fall back to the note's creation timestamp from metadata.
+     */
+    private resolveNoteDate(book: BookResult, relativePath: string | undefined): Date | null {
+        const candidates = [relativePath?.split('/').pop() ?? '', book.bookName];
+        for (const candidate of candidates) {
+            const m = candidate.match(/day_(\d{4})_(\d{1,2})_(\d{1,2})/i);
+            if (m) {
+                return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+            }
+        }
+
+        const meta = book.metadata as Record<string, unknown>;
+        const epoch = [meta.createTime, meta.creationTime, meta.lastModifiedTime, meta.upTime]
+            .map(v => (typeof v === 'number' ? v : typeof v === 'string' ? parseInt(v, 10) : NaN))
+            .find(v => Number.isFinite(v) && v > 0);
+        if (epoch !== undefined) {
+            // Viwoods timestamps are in milliseconds.
+            return new Date(epoch);
+        }
+        return null;
+    }
+
+    /**
+     * Read Obsidian's core Daily Notes configuration (folder + filename format).
+     * Falls back to sensible defaults when it isn't configured.
+     */
+    private getDailyNotesConfig(): { folder: string; format: string } {
+        try {
+            const dn = (this.app as unknown as {
+                internalPlugins?: {
+                    getPluginById?: (id: string) => { instance?: { options?: { folder?: string; format?: string } } } | null;
+                };
+            }).internalPlugins?.getPluginById?.('daily-notes');
+            const opts = dn?.instance?.options;
+            if (opts) {
+                return {
+                    folder: (opts.folder ?? '').replace(/\/+$/, ''),
+                    format: opts.format || 'YYYY-MM-DD'
+                };
+            }
+        } catch (error) {
+            log.debug('Could not read daily-notes config, using defaults', error);
+        }
+        return { folder: '', format: 'YYYY-MM-DD' };
     }
 
     /**
